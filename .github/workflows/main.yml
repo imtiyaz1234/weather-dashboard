@@ -1,0 +1,34 @@
+name: Weather collector
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes (GitHub may delay it a few minutes)
+  workflow_dispatch:          # adds a "Run workflow" button for manual testing
+
+concurrency:
+  group: weather-collector    # never run two at once
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install packages
+        run: pip install -r requirements.txt
+
+      - name: Run one collection cycle
+        run: python collector.py
+        env:
+          OWM_API_KEY: ${{ secrets.OWM_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          LAT: "49.2827"
+          LON: "-123.1207"
