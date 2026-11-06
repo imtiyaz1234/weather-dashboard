@@ -1,0 +1,4 @@
+requests
+river
+supabase
+python-dotenv
