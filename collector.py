@@ -36,7 +36,9 @@ except ImportError:
 LAT = float(os.getenv("LAT", "49.2827"))     # default: Vancouver
 LON = float(os.getenv("LON", "-123.1207"))
 HORIZON_MIN = 10                              # predict this many minutes ahead
-MAX_DELTA = 3.0                               # cap on predicted change (°C) for safety
+MAX_DELTA = 1.5                               # cap on predicted change (°C) for safety
+FEATURES = ["temp", "humidity", "pressure", "wind", "cloud",
+            "hour_sin", "hour_cos", "temp_trend", "pressure_trend"]
 OWM_KEY = os.getenv("OWM_API_KEY")
 OM_URL = "https://api.open-meteo.com/v1/forecast"
 OWM_URL = "https://api.openweathermap.org/data/2.5/weather"
@@ -125,8 +127,10 @@ def make_features(cur, prev, ts, readings):
     cur:  fused weather now
     prev: (features dict from last run, minutes ago) or None
     """
+    # Note: no "difference between sources" feature. The 30-day history has only one
+    # source, so that feature was always 0 during warm-start; live values then got
+    # scaled to huge numbers and made the model's weights explode.
     hour = ts.hour + ts.minute / 60
-    temps = [r["temperature"] for r in readings if r.get("temperature") is not None]
     f = {
         "temp": cur["temperature"],
         "humidity": cur["humidity"],
@@ -137,7 +141,6 @@ def make_features(cur, prev, ts, readings):
         "hour_cos": math.cos(2 * math.pi * hour / 24),
         "temp_trend": 0.0,       # how fast temp is changing (per 10 min)
         "pressure_trend": 0.0,
-        "source_gap": (max(temps) - min(temps)) if len(temps) > 1 else 0.0,
     }
     if prev:
         pf, mins = prev
@@ -151,7 +154,9 @@ def make_features(cur, prev, ts, readings):
 def new_model():
     return compose.Pipeline(
         preprocessing.StandardScaler(),
-        linear_model.LinearRegression(optimizer=optim.SGD(0.01), l2=0.001),
+        # small learning rate + gradient clipping so one surprising reading
+        # can't throw the model off
+        linear_model.LinearRegression(optimizer=optim.SGD(0.005), l2=0.001, clip_gradient=1.0),
     )
 
 
@@ -227,7 +232,8 @@ def resolve_pending(model, actual, now):
             .execute().data)
     for p in rows:
         # Learn the TRUE change that happened, from the inputs we had back then
-        model.learn_one(p["features"], actual - p["baseline_temp"])
+        feats = {k: v for k, v in p["features"].items() if k in FEATURES}
+        model.learn_one(feats, actual - p["baseline_temp"])
         sb.table("predictions").update({
             "actual_temp": actual,
             "error": abs(actual - p["predicted_temp"]),
