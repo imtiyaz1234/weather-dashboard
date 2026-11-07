@@ -2,17 +2,21 @@ name: Weather collector
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes (GitHub may delay it a few minutes)
-  workflow_dispatch:          # adds a "Run workflow" button for manual testing
+    - cron: "0 */6 * * *"   # backup starter only; each job starts the next one itself
+  workflow_dispatch:          # "Run workflow" button
+
+permissions:
+  contents: read
+  actions: write              # lets the job start the next run
 
 concurrency:
-  group: weather-collector    # never run two at once
+  group: weather-collector    # only one collector at a time
   cancel-in-progress: false
 
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 358
     steps:
       - uses: actions/checkout@v4
 
@@ -24,11 +28,19 @@ jobs:
       - name: Install packages
         run: pip install -r requirements.txt
 
-      - name: Run one collection cycle
-        run: python collector.py
+      - name: Collect every 10 minutes for about 5.5 hours
+        run: python run_loop.py
         env:
           OWM_API_KEY: ${{ secrets.OWM_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           LAT: "49.2827"
           LON: "-123.1207"
+          LOOP_MINUTES: "340"
+          PYTHONUNBUFFERED: "1"
+
+      - name: Start the next run
+        if: success() || failure()   # not when you cancel it by hand
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run main.yml --ref "${{ github.ref_name }}" --repo "${{ github.repository }}"
