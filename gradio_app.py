@@ -332,7 +332,8 @@ def banner_html(items, c):
     watches = [i["decision"] for i in items if i["status"] == "watch"]
     if stops:
         icon, bg, border = "🔴", "rgba(227,73,72,0.14)", "#e34948"
-        text = f"<b>{len(stops)} risk{'s' if len(stops) > 1 else ''} need action now:</b> {', '.join(stops)}"
+        text = (f"<b>{len(stops)} risk{'s need' if len(stops) > 1 else ' needs'} action now:</b> "
+                f"{', '.join(stops)}")
     elif watches:
         icon, bg, border = "🟠", "rgba(237,161,0,0.16)", "#eda100"
         text = f"<b>Watch closely:</b> {', '.join(watches)}"
@@ -673,19 +674,22 @@ with gr.Blocks() as demo:
         with gr.Tab("Explore the data"):
             gr.Markdown("Use **Date range**, **Weather sources** and **Variable to explore** above. "
                         "Dashed red lines show your site limits.")
-            explore_plot = gr.Plot(label="Live readings")
+            gr.Markdown("#### Live readings by source")
+            explore_plot = gr.Plot(show_label=False)
             explore_text = gr.Markdown()
             gr.Markdown("### Past 30 days at this site (ERA5 public dataset)")
             hist_summary = gr.HTML()
-            hist_plot = gr.Plot(label="ERA5 hourly history")
+            hist_plot = gr.Plot(show_label=False)
             readings_table = gr.Dataframe(label="Latest readings", interactive=False)
         with gr.Tab("Forecast accuracy & learning"):
             gr.Markdown("Every 10 minutes the model predicts the temperature, then checks itself against the "
                         "real value and learns from the error. **Lower error is better.** When the blue line "
                         "sits below the purple one, learning is beating the model that never learns.")
             acc_summary = gr.HTML()
-            pred_plot = gr.Plot(label="Predicted vs. actual temperature")
-            err_plot = gr.Plot(label="Is the model learning? Rolling average error")
+            gr.Markdown("#### Predicted vs. actual temperature")
+            pred_plot = gr.Plot(show_label=False)
+            gr.Markdown("#### Is the model learning? Rolling average error")
+            err_plot = gr.Plot(show_label=False)
         with gr.Tab("About"):
             gr.Markdown(ABOUT_MD)
 
