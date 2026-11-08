@@ -178,17 +178,20 @@ def new_model():
     )
 
 
-def load_model():
-    res = sb.table("model_state").select("*").eq("id", 1).execute()
+LEARNING_ID, FROZEN_ID = 1, 2      # rows in the model_state table
+
+
+def load_model(model_id=LEARNING_ID):
+    res = sb.table("model_state").select("*").eq("id", model_id).execute()
     if res.data:
         row = res.data[0]
         return pickle.loads(base64.b64decode(row["model_b64"])), row["n_learned"]
     return None, 0
 
 
-def save_model(model, n_learned):
+def save_model(model, n_learned, model_id=LEARNING_ID):
     sb.table("model_state").upsert({
-        "id": 1,
+        "id": model_id,
         "model_b64": base64.b64encode(pickle.dumps(model)).decode(),
         "n_learned": n_learned,
         "updated_at": iso(now_utc()),
@@ -240,10 +243,63 @@ def warm_start(model):
     return model, samples
 
 
+def predict_delta(model, feats):
+    """Predicted temperature change over the next 10 minutes, capped for safety."""
+    return max(-MAX_DELTA, min(MAX_DELTA, model.predict_one(feats)))
+
+
+# ---------------- Frozen model (the "no learning" comparison) ----------------
+# Trained exactly like the learning model (30 days of history) but NEVER updated
+# with live data. Comparing the two shows how much the live learning helps.
+_frozen = None
+
+
+def get_frozen():
+    """Load the frozen model; create it (and score past predictions) the first time."""
+    global _frozen
+    if _frozen is None:
+        _frozen, _ = load_model(FROZEN_ID)
+    if _frozen is None:
+        model, n = warm_start(new_model())
+        if n == 0:
+            raise RuntimeError("history unavailable; frozen model not created")
+        save_model(model, 0, FROZEN_ID)
+        _frozen = model
+        print(f"[frozen] created from {n} historical samples (it will never learn)")
+        backfill_frozen(_frozen)
+    return _frozen
+
+
+def backfill_frozen(model):
+    """Score the frozen model on every past prediction, using the inputs saved with each one."""
+    last_id, done = 0, 0
+    while True:
+        rows = (sb.table("predictions")
+                .select("id,baseline_temp,actual_temp,features")
+                .is_("frozen_temp", "null").gt("id", last_id)
+                .order("id").limit(500).execute().data)
+        if not rows:
+            break
+        for p in rows:
+            last_id = p["id"]
+            feats = {k: v for k, v in (p["features"] or {}).items() if k in FEATURES}
+            if len(feats) != len(FEATURES):
+                continue
+            frozen_temp = p["baseline_temp"] + predict_delta(model, feats)
+            update = {"frozen_temp": round(frozen_temp, 3)}
+            if p["actual_temp"] is not None:
+                update["frozen_error"] = abs(p["actual_temp"] - frozen_temp)
+            sb.table("predictions").update(update).eq("id", p["id"]).execute()
+            done += 1
+    if done:
+        print(f"[frozen] scored {done} past predictions")
+    return done
+
+
 # ---------------- 3 + 4. Check old predictions and learn ----------------
 def resolve_pending(model, actual, now):
     rows = (sb.table("predictions")
-            .select("id,predicted_temp,baseline_temp,features")
+            .select("id,predicted_temp,baseline_temp,frozen_temp,features")
             .is_("actual_temp", "null")
             .lte("target_time", iso(now + timedelta(minutes=2)))
             .gte("target_time", iso(now - timedelta(minutes=30)))
@@ -252,15 +308,20 @@ def resolve_pending(model, actual, now):
         # Learn the TRUE change that happened, from the inputs we had back then
         feats = {k: v for k, v in p["features"].items() if k in FEATURES}
         model.learn_one(feats, actual - p["baseline_temp"])
-        sb.table("predictions").update({
+        update = {
             "actual_temp": actual,
             "error": abs(actual - p["predicted_temp"]),
             "baseline_error": abs(actual - p["baseline_temp"]),
             "resolved_at": iso(now),
-        }).eq("id", p["id"]).execute()
+        }
+        frozen_note = ""
+        if p.get("frozen_temp") is not None:
+            update["frozen_error"] = abs(actual - p["frozen_temp"])
+            frozen_note = f", frozen error {update['frozen_error']:.2f}"
+        sb.table("predictions").update(update).eq("id", p["id"]).execute()
         print(f"[check] predicted {p['predicted_temp']:.2f}°C, actual {actual:.2f}°C, "
-              f"error {abs(actual - p['predicted_temp']):.2f} "
-              f"(baseline error {abs(actual - p['baseline_temp']):.2f})")
+              f"error {update['error']:.2f} "
+              f"(baseline error {update['baseline_error']:.2f}{frozen_note})")
     return len(rows)
 
 
@@ -313,16 +374,24 @@ def main():
 
     # 5. Predict
     feats = make_features(cur, get_prev(now), now, readings)
-    delta = max(-MAX_DELTA, min(MAX_DELTA, model.predict_one(feats)))
+    delta = predict_delta(model, feats)
     pred = cur["temperature"] + delta
-    sb.table("predictions").insert({
+    row = {
         "made_at": iso(now),
         "target_time": iso(now + timedelta(minutes=HORIZON_MIN)),
         "predicted_temp": round(pred, 3),
         "baseline_temp": cur["temperature"],
         "features": feats,
-    }).execute()
-    print(f"[predict] in {HORIZON_MIN} min: {pred:.2f}°C (change {delta:+.2f})")
+    }
+    frozen_note = ""
+    try:  # the frozen comparison must never stop the main cycle
+        frozen_pred = cur["temperature"] + predict_delta(get_frozen(), feats)
+        row["frozen_temp"] = round(frozen_pred, 3)
+        frozen_note = f" | frozen model: {frozen_pred:.2f}°C"
+    except Exception as e:
+        print(f"[warn] frozen model skipped: {e}")
+    sb.table("predictions").insert(row).execute()
+    print(f"[predict] in {HORIZON_MIN} min: {pred:.2f}°C (change {delta:+.2f}){frozen_note}")
 
     # 6. Save
     save_model(model, n_learned)
