@@ -13,12 +13,24 @@ import traceback
 from datetime import datetime, timezone
 
 import collector
+import history
 
 INTERVAL = int(os.getenv("INTERVAL_SECONDS", "600"))     # 10 minutes
 LOOP_MINUTES = int(os.getenv("LOOP_MINUTES", "340"))     # stay under GitHub's 6-hour job limit
 
 
+def load_public_dataset():
+    """Refresh the 30-day ERA5 public dataset once per job. Never blocks collection."""
+    try:
+        rows = history.refresh_history(collector.sb, collector.LAT, collector.LON)
+        span = f", {rows[0]['ts']} to {rows[-1]['ts']}" if rows else ""
+        print(f"[history] public dataset: {len(rows)} hourly ERA5 records loaded{span}", flush=True)
+    except Exception as e:
+        print(f"[warn] public dataset not loaded: {e}", flush=True)
+
+
 def main():
+    load_public_dataset()
     end = time.time() + LOOP_MINUTES * 60
     cycle = 0
     while True:

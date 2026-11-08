@@ -42,6 +42,8 @@ FEATURES = ["temp", "humidity", "pressure", "wind", "cloud",
 OWM_KEY = os.getenv("OWM_API_KEY")
 OM_URL = "https://api.open-meteo.com/v1/forecast"
 OWM_URL = "https://api.openweathermap.org/data/2.5/weather"
+AQ_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
+AQ_FIELDS = ["pm2_5", "pm10", "us_aqi", "ozone", "nitrogen_dioxide", "carbon_monoxide"]
 FIELDS = ["temperature", "humidity", "pressure", "wind_speed", "cloud_cover"]
 
 sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
@@ -81,14 +83,17 @@ def fetch_openweathermap():
         "humidity": d["main"]["humidity"],
         "pressure": d["main"]["pressure"],
         "wind_speed": d.get("wind", {}).get("speed"),
+        "wind_gust": d.get("wind", {}).get("gust"),
         "cloud_cover": d.get("clouds", {}).get("all"),
+        "precipitation": d.get("rain", {}).get("1h", 0.0),   # mm in the last hour
     }
 
 
 def fetch_open_meteo():
     r = requests.get(OM_URL, params={
         "latitude": LAT, "longitude": LON,
-        "current": "temperature_2m,relative_humidity_2m,pressure_msl,wind_speed_10m,cloud_cover",
+        "current": "temperature_2m,relative_humidity_2m,pressure_msl,wind_speed_10m,"
+                   "wind_gusts_10m,cloud_cover,precipitation",
         "wind_speed_unit": "ms", "timezone": "UTC",
     }, timeout=15)
     r.raise_for_status()
@@ -99,8 +104,21 @@ def fetch_open_meteo():
         "humidity": c["relative_humidity_2m"],
         "pressure": c["pressure_msl"],
         "wind_speed": c["wind_speed_10m"],
+        "wind_gust": c.get("wind_gusts_10m"),
         "cloud_cover": c["cloud_cover"],
+        "precipitation": c.get("precipitation"),
     }
+
+
+def fetch_air_quality():
+    """Third live source: air quality (Open-Meteo, based on the CAMS model)."""
+    r = requests.get(AQ_URL, params={
+        "latitude": LAT, "longitude": LON,
+        "current": ",".join(AQ_FIELDS), "timezone": "UTC",
+    }, timeout=15)
+    r.raise_for_status()
+    c = r.json()["current"]
+    return {"source": "open-meteo-air-quality", **{f: c.get(f) for f in AQ_FIELDS}}
 
 
 def safe(fn):
@@ -273,6 +291,16 @@ def main():
     sb.table("readings").insert(readings).execute()
     cur = fuse(readings)
     print(f"[fetch] {len(readings)} source(s), fused temp {cur['temperature']:.2f}°C")
+
+    # 2b. Air quality (third source). A failure here never stops the weather cycle.
+    aq = safe(fetch_air_quality)
+    if aq:
+        try:
+            aq["ts"] = iso(now)
+            sb.table("air_quality").insert(aq).execute()
+            print(f"[air] PM2.5 {aq['pm2_5']} µg/m³, US AQI {aq['us_aqi']}")
+        except Exception as e:
+            print(f"[warn] could not save air quality: {e}")
 
     # Load model (or create + warm start on the very first run)
     model, n_learned = load_model()
