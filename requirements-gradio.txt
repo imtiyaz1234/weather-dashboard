@@ -3,3 +3,4 @@ supabase
 pandas>=2.0
 plotly>=5.20
 tzdata
+python-dotenv

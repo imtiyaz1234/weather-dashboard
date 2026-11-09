@@ -27,6 +27,12 @@ import pandas as pd
 import plotly.graph_objects as go
 from supabase import create_client
 
+try:  # optional: read settings from a .env file when running on your own computer
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # ---------------- Settings ----------------
 TZ = ZoneInfo(os.getenv("TIMEZONE", "America/Vancouver"))
 LOCATION = os.getenv("LOCATION_NAME", "Vancouver, BC")
